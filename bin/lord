@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -eu
+
+runner=${0##*/}
+case "$runner" in
+    law) effort=none ;;
+    lawd) effort=low ;;
+    lord) effort=medium ;;
+    lordey) effort=high ;;
+    lordjesus) effort=xhigh ;;
+    lordhavemercy) effort=xhigh ;;
+    lordgodelmighty) effort=xhigh ;;
+    lordgodupinheaven) effort=xhigh ;;
+    lordylordydaddysforty) effort=max ;;
+    *) printf '%s: unknown runner\n' "$runner" >&2; exit 2 ;;
+esac
+
+codex=${LORD_CODEX:-${GEN_CODEX:-codex}}
+claude=${LORD_CLAUDE:-claude}
+config=${XDG_CONFIG_HOME:-$HOME/.config}/lord
+provider=
+if [ -r "$config/provider" ]; then IFS= read -r provider < "$config/provider" || :; fi
+auth_usage() {
+    printf '%s\n' 'usage: lord auth login [codex|claude] [PROVIDER OPTIONS ...]' \
+        '       lord auth status [codex|claude]'
+}
+
+if [ "${1:-}" = auth ]; then
+    shift
+    action=${1:-}
+    case $action in
+        login|status) shift ;;
+        -h|--help) auth_usage; exit ;;
+        *) auth_usage >&2; exit 2 ;;
+    esac
+    case ${1:-} in
+        codex|claude) provider=$1; shift ;;
+        ''|-*) ;;
+        *) auth_usage >&2; exit 2 ;;
+    esac
+    case $provider in
+        codex|claude) ;;
+        *) if command -v "$claude" >/dev/null 2>&1; then provider=claude; else provider=codex; fi ;;
+    esac
+    case $provider in
+        codex) cli=$codex; cli_setting=LORD_CODEX ;;
+        claude) cli=$claude; cli_setting=LORD_CLAUDE ;;
+    esac
+    if ! command -v "$cli" >/dev/null 2>&1; then
+        printf 'lord: install the %s CLI or set %s to its path\n' "$provider" "$cli_setting" >&2
+        exit 69
+    fi
+    case $action:$provider in
+        status:*)
+            [ "$#" -eq 0 ] || { auth_usage >&2; exit 2; }
+            case $provider in codex) exec "$cli" login status ;; claude) exec "$cli" auth status ;; esac ;;
+        login:codex) set -- "$cli" login "$@" ;;
+        login:claude) set -- "$cli" auth login "$@" ;;
+    esac
+    for option do
+        case $option in -h|--help) exec "$@" ;; esac
+    done
+    # Keep the provider's terminal streams, exit status, and credential store.
+    # Publish the preference only when the provider's login succeeds.
+    "$@"
+    umask 077
+    mkdir -p -- "$config"
+    selection=$(mktemp "$config/.provider.XXXXXXXX")
+    trap 'rm -f -- "$selection"' 0
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    printf '%s\n' "$provider" > "$selection"
+    mv -f -- "$selection" "$config/provider"
+    exit
+fi
+
+permission=${LORD_PERMISSION:-text}
+program=${LORD_PROGRAM:-${NSH_PROGRAM:-}}
+verbose=0
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        -h|--help)
+            printf '%s\n' 'usage: lord [-n|-i|-f] [-v|--verbose] [--effort 0..5|LEVEL] [--permission text|read|write] [--program FILE] [--] [REQUEST ...]' \
+                'LORD_BACKEND selects an executable that accepts request argv and input on stdin.' \
+                'With no request, read the prompt from stdin. Read and write permissions use Codex.'
+            auth_usage
+            exit ;;
+        --effort|--permission|--program)
+            [ "$#" -ge 2 ] || { printf '%s needs a value\n' "$1" >&2; exit 2; }
+            case $1 in
+                --effort) effort=$2 ;;
+                --permission) permission=$2 ;;
+                --program) program=$2 ;;
+            esac
+            shift 2 ;;
+        --effort=*) effort=${1#*=}; shift ;;
+        --permission=*) permission=${1#*=}; shift ;;
+        --program=*) program=${1#*=}; shift ;;
+        -n) permission=text; shift ;;
+        -i) permission=read; shift ;;
+        -f) permission=write; shift ;;
+        -v|--verbose) verbose=1; shift ;;
+        @@) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+case $effort in
+    0|none) effort=none ;;
+    1|low) effort=low ;;
+    2|medium) effort=medium ;;
+    3|high) effort=high ;;
+    4|xhigh) effort=xhigh ;;
+    5|max) effort=max ;;
+    *) printf 'lord: invalid effort %s\n' "$effort" >&2; exit 2 ;;
+esac
+case $permission in text|read|write) ;; *) printf 'lord: invalid permission %s\n' "$permission" >&2; exit 2 ;; esac
+if [ -n "$program" ] && { [ ! -f "$program" ] || [ ! -r "$program" ]; }; then
+    printf 'lord: cannot read %s\n' "$program" >&2
+    exit 2
+fi
+if [ -n "$program" ]; then
+    case $program in /*) ;; *) program=$PWD/$program ;; esac
+fi
+LORD_EFFORT=$effort LORD_PERMISSION=$permission LORD_PROGRAM=$program LORD_RUNNER=$runner
+export LORD_EFFORT LORD_PERMISSION LORD_PROGRAM LORD_RUNNER
+
+if [ -n "${LORD_BACKEND:-}" ]; then
+    backend=$LORD_BACKEND
+elif [ "$provider" = codex ] && command -v "$codex" >/dev/null 2>&1; then
+    backend=$codex
+elif [ "$permission" = text ] && command -v "$claude" >/dev/null 2>&1; then
+    backend=$claude
+    provider=claude
+elif command -v "$codex" >/dev/null 2>&1; then
+    backend=$codex
+    provider=codex
+else
+    printf '%s\n' 'lord: install Codex or Claude, or set LORD_BACKEND (see lord --help)' >&2
+    exit 69
+fi
+
+if ((verbose)); then
+    printf '%s: %s (effort=%s, permission=%s)\n' "$runner" "$backend" "$effort" "$permission" >&2
+fi
+if [ -n "${LORD_BACKEND:-}" ]; then
+    exec "$backend" "$@"
+fi
+
+prompt=()
+if (($#)); then prompt=(-- "$*"); fi
+model=${LORD_MODEL:-}
+if [ "$provider" = claude ]; then
+    if [ "$effort" = none ]; then effort=low; fi
+    args=(--print --no-session-persistence --safe-mode --strict-mcp-config
+        --tools '' --disallowedTools 'mcp__*' --effort "$effort")
+    if ((verbose)); then args+=(--verbose); fi
+    if [ -n "$program" ]; then args+=(--append-system-prompt-file "$program"); fi
+    if [ -n "$model" ]; then args+=(--model "$model"); fi
+    DISABLE_AUTOUPDATER=1 exec "$backend" "${args[@]}" "${prompt[@]}"
+fi
+
+sandbox=read-only
+if [ "$permission" = write ]; then sandbox=workspace-write; fi
+args=(exec --ephemeral --skip-git-repo-check --color never --sandbox "$sandbox"
+    --ignore-user-config --disable apps --disable plugins --disable hooks --disable computer_use
+    -c 'mcp_servers={}' -c 'web_search="disabled"' -c 'approval_policy="never"'
+    -c 'sandbox_workspace_write.network_access=false' -c "model_reasoning_effort=\"$effort\"")
+if [ "$permission" = text ]; then
+    args+=(--disable shell_tool --disable view_image --disable multi_agent --disable multi_agent_v2
+        -c 'project_doc_max_bytes=0')
+fi
+if [ -n "$program" ]; then
+    instructions=$(<"$program")
+    instructions=${instructions//\\/\\\\}
+    instructions=${instructions//\"/\\\"}
+    instructions=${instructions//$'\n'/\\n}
+    instructions=${instructions//$'\t'/\\t}
+    instructions=${instructions//$'\r'/\\r}
+    instructions=${instructions//$'\b'/\\b}
+    instructions=${instructions//$'\f'/\\f}
+    args+=(-c "developer_instructions=\"$instructions\"")
+fi
+if [ "$runner" = law ]; then model=${LORD_FAST_MODEL:-$model}; fi
+if [ -n "$model" ]; then args+=(--model "$model"); fi
+exec "$backend" "${args[@]}" "${prompt[@]}"
